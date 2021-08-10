@@ -5,10 +5,15 @@ import torch.nn.init as init
 from torch.autograd import Variable
 
 
+#import model zoo in torchvision
+import torchvision.transforms as transforms
+
+
 def reparametrize(mu, logvar):
     std = logvar.div(2).exp()
     eps = Variable(std.data.new(std.size()).normal_())
     return mu + std*eps
+
 
 class View(nn.Module):
     def __init__(self, size):

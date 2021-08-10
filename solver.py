@@ -1,4 +1,11 @@
 """solver.py"""
+# sub_components={"seat", "legs", "back", "top" }
+# cabinet;shelf;table;chair;
+main_components=["cabinet", "shelf", "table", "chair"]
+sub_components={"frame","doors","handles","legs","back","seat","top"}
+main_components_number= len(main_components)
+sub_components_number= len(sub_components)
+n_key=sub_components_number
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -12,7 +19,7 @@ from PIL import Image, ImageDraw
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-
+import pandas as pd
 import torch
 import torch.optim as optim
 from torchvision.utils import make_grid, save_image
@@ -21,9 +28,9 @@ from torchvision import transforms
 from utils import cuda, grid2gif
 from model import BetaVAE_H_net, BetaVAE_B_net, DAE_net, SCAN_net
 from dataset import return_data,return_data_test
+from visualize import filter1,filter2
 
-components={ "washbasin", "bed", "cabinet", "rack", "shelf", "table", "chair", "sofa", "pouf" }
-components_number=9
+
 
 
 #---------------------------------TEMPLATES-------------------------------------#
@@ -64,10 +71,10 @@ class Solver(ABC):
         self.optim = optim.Adam(self.net.parameters(), lr=self.args.lr,
                                betas=(self.args.beta1, self.args.beta2), eps=self.args.epsilon)
         self.load_checkpoint(self.args.ckpt_name)
-        if(self.args.phase=='SCAN'):
-            self.data_loader,self.data_test=return_data_test(self.args, require_attr)
-        else:
-            self.data_loader = return_data(self.args, require_attr)
+        # if(self.args.phase=='SCAN'):
+        self.data_loader,self.data_test=return_data_test(self.args, require_attr)
+        # else:
+        # self.data_loader = return_data(self.args, require_attr)
 
     def prepare_training(self):
         pass
@@ -83,6 +90,18 @@ class Solver(ABC):
     @abstractmethod
     def load_win_states(self):
         pass
+    def sym2img(self,symbol):
+        pass
+    def visualize_filter_feature(self):
+        f2 = filter2(self)
+        f2.access_layers()
+        num_filter=1
+        f2.visualize_filter()
+        for x in self.data_test:
+            for img in x:
+                if(num_filter>0):
+                    num_filter-=1
+                    f2.visualize_feature(img.unsqueeze(0))
 
     def train(self):
         self.net_mode(train=True)
@@ -96,6 +115,7 @@ class Solver(ABC):
                 self.pbar.update(1)
 
                 loss = self.training_process(x)
+                # print(loss)
                 self.optim.zero_grad()
                 loss.backward()
                 self.optim.step()
@@ -109,47 +129,79 @@ class Solver(ABC):
         self.pbar.close()
 
     def make_confusion_mat_component(self,real_attributes, predicted_attributes):
-        real_confusion_mat = [[0] * self.n_key for _ in range(components_number)]
-        predicted_confusion_mat = [[0] * self.n_key for _ in range(components_number)]
-        component_index = real_attributes.index(1, 0, components_number)
-        for ind in components:
-            real_confusion_mat[ind] = real_attributes
-            predicted_confusion_mat[ind] = predicted_attributes
-        # for i in range(attributeSize):
-        #   if(real_attributes[i]==1):
-        #     if(predicted_attributes[i]==1):
-        #       one_confusion_mat[i][i] = 1
-        #     else:
-        #       for j in range(attributeSize):
-        #         if(predicted_attributes[j]==1):
-        #           one_confusion_mat[i][j]=1
+        real_confusion_mat = [[0] * self.n_key for _ in range(sub_components_number)]
+        predicted_confusion_mat = [[0] * self.n_key for _ in range(sub_components_number)]
+        real_component_index = [i for i, value in enumerate(list(real_attributes[0:sub_components_number])) if value == 1]
+        predicted_component_index = [i for i, value in enumerate(list(predicted_attributes[0:sub_components_number])) if value == 1]
+
+        for ind in real_component_index:
+            real_confusion_mat[ind] = list(real_attributes)
+            predicted_confusion_mat[ind] = list(predicted_attributes)
+        return real_confusion_mat, predicted_confusion_mat
+
+    def make_confusion_mat_subcomponent(self,real_attributes, predicted_attributes):
+        real_confusion_mat = [[0] * self.n_key for _ in range(sub_components_number)]
+        predicted_confusion_mat = [[0] * self.n_key for _ in range(sub_components_number)]
+        real_component_index = [i for i, value in enumerate(list(real_attributes[0:sub_components_number])) if value == 1]
+        predicted_component_index = [i for i, value in enumerate(list(predicted_attributes[0:sub_components_number])) if value == 1]
+
+        for ind in real_component_index:
+            real_confusion_mat[ind][ind] =1
+            if(predicted_attributes[ind]==1):
+                predicted_confusion_mat[ind][ind] = 1
+            else:
+                for wrong_ind in predicted_component_index:
+                    if(wrong_ind not in real_component_index):
+                        predicted_confusion_mat[ind][wrong_ind] = 1
+        return real_confusion_mat, predicted_confusion_mat
+
+    def make_confusion_mat_sub_main(self,real_attributes, predicted_attributes,compoenent_ID):
+        real_confusion_mat = [[0] * self.n_key for _ in range(main_components_number)]
+        predicted_confusion_mat = [[0] * self.n_key for _ in range(main_components_number)]
+        real_confusion_mat[compoenent_ID]=list(real_attributes)
+        predicted_confusion_mat[compoenent_ID]=list(predicted_attributes)
         return real_confusion_mat, predicted_confusion_mat
 
     def test(self):
         self.net_mode(train=True)
         self.prepare_training()
         data_test_len=len(self.data_test)
-        self.pbar = tqdm(total=self.data_test)
-        self.update(0)
+        self.pbar = tqdm(total=data_test_len)
+        self.pbar.update(0)
         self.pbar.set_description('[test starting]')
         test_error=0
-        for x in self.data_loader:
+        confusion_mat_real=[[0] * self.nc for _ in range(main_components_number)]
+        confusion_mat_predicted=[[0] * self.nc for _ in range(main_components_number)]
+        test_ind=0
+        for x in self.data_test:
+            test_ind+=1
             self.pbar.update(1)
             show_plt=False
-            if(self.pbar.last_print_n%100==0):
+            if(self.pbar.last_print_n%10==0):
                 show_plt=True
-            predicted_attribute,real_attribute = self.testing_process(x,show_plt)
-            test_error+=np.square(np.subtract(predicted_attribute,real_attribute)).mean()
-            one_confusion_mat_real, one_confusion_mat_predicted = self.make_confusion_mat_component(real_attribute,predicted_attribute)
-            confusion_mat_real = np.array(confusion_mat_real) + np.array(one_confusion_mat_real)
-            confusion_mat_predicted = np.array(confusion_mat_predicted) + np.array(one_confusion_mat_predicted)
+            predicted_attribute,real_attribute,compoenent_ID = self.testing_process(x,show_plt)
+            test_error+=np.square(np.subtract(predicted_attribute.cpu().detach().numpy(),real_attribute.cpu().detach().numpy())).mean()
+            for y_ind in range(0, len(real_attribute)):
+                c_ID=compoenent_ID[y_ind]
+                real_cpu=real_attribute[y_ind].cpu().detach().numpy()
+                predicted_cpu=predicted_attribute[y_ind].cpu().detach().numpy()
+                for attr_ind in range(self.n_key):
+                    if (predicted_cpu[attr_ind] > 0.3):
+                        predicted_cpu[attr_ind] = 1
+                    else:
+                        predicted_cpu[attr_ind] = 0
+                one_confusion_mat_real, one_confusion_mat_predicted = self.make_confusion_mat_sub_main(real_cpu,predicted_cpu,c_ID)
+                confusion_mat_real = np.array(confusion_mat_real) + np.array(one_confusion_mat_real)
+                confusion_mat_predicted = np.array(confusion_mat_predicted) + np.array(one_confusion_mat_predicted)
         self.pbar.write("[test Finished]")
         self.pbar.close()
         print("real attributes")
-        print(confusion_mat_real)
+        real_title = pd.DataFrame(confusion_mat_real, columns=self.keys, index=main_components)
+        print(real_title)
         print("predicted attributes")
-        print(confusion_mat_predicted)
-        print("test error percentage: " + str(test_error / (data_test_len)))
+        predicted_title = pd.DataFrame(confusion_mat_predicted, columns=self.keys, index=main_components)
+        print(predicted_title)
+        print("test error percentage: " + str(test_error / test_ind))
 
     def vis_display(self, image_set, traverse=True):
         if self.args.vis_on:
@@ -284,6 +336,8 @@ class super_beta_VAE(Solver):
 
     def testing_process(self,x,show_plot_or_not):
         pass
+    def sym2img(self,symbol):
+        pass
     def vis_traverse(self, limit=3, inter=2/3, loc=-1):
         self.net_mode(train=False)
 
@@ -354,7 +408,7 @@ class super_beta_VAE(Solver):
             for i, key in enumerate(Z.keys()):
                 for j, val in enumerate(interpolation):
                     save_image(tensor=gifs[i][j].cpu(),
-                               filename=os.path.join(output_dir, '{}_{}.jpg'.format(key, j)),
+                               fp=os.path.join(output_dir, '{}_{}.jpg'.format(key, j)),
                                nrow=self.z_dim, pad_value=1)
 
                 grid2gif(os.path.join(output_dir, key+'*.jpg'),
@@ -410,6 +464,8 @@ class DAE(Solver):
         pass
     def testing_process(self,x,show_plot_or_not):
         pass
+    def sym2img(self,symbol):
+        pass
     def training_process(self, x):
         x = self.tensor(x)
         masked = random_occluding(x, [self.args.batch_size, self.nc, self.args.image_size, self.args.image_size], cuda_or_not=self.args.cuda)
@@ -420,7 +476,7 @@ class DAE(Solver):
         if self.args.vis_on and self.global_iter % self.args.gather_step == 0:
             self.gather.insert(iter=self.global_iter, recon_loss=recon_loss.data)
         if self.global_iter % self.args.display_save_step == 0:
-            self.pbar.write('[{}] recon_loss:{:.3f}'.format(self.global_iter, recon_loss.data[0]))
+            self.pbar.write('[{}] recon_loss:{:.3f}'.format(self.global_iter, recon_loss.data.item()))
             self.vis_display([masked, x_recon], traverse=False)
 
         return loss
@@ -448,11 +504,11 @@ class SCAN(Solver):
         self.win_var = None
         self.keys = None
 
-        super(SCAN, self).__init__(args, require_attr=True, nc=40)
+        super(SCAN, self).__init__(args, require_attr=True, nc=n_key)
 
         beta_VAE_solver = beta_VAE(args)
         beta_VAE_solver.net_mode(train=False)
-        self.beta_VAE_net = beta_VAE_solver.net
+        # self.beta_VAE_net = beta_VAE_solver.net
         self.DAE_net = beta_VAE_solver.DAE_net
 
     def training_process(self, data):
@@ -463,15 +519,22 @@ class SCAN(Solver):
             self.keys = np.asarray(keys)[:, 0].tolist()
             self.n_key = len(self.keys)
         y_recon, mu_y, logvar_y = self.net(y)
+        if(torch.isnan(mu_y).any()):
+            print(1)
+        if(torch.isnan(logvar_y).any()):
+            print(1)
         z_x = self.beta_VAE_net._encode(x)
         mu_x = z_x[:, :self.args.beta_VAE_z_dim]
         logvar_x = z_x[:, self.args.beta_VAE_z_dim:]
 
-        recon_loss = reconstruction_loss(y, y_recon, 'bernoulli')
+        recon_loss = reconstruction_loss(y, y_recon, 'gaussian')
         kld = kl_divergence(mu_y, logvar_y)
         relv = dual_kl_divergence(mu_x, logvar_x, mu_y, logvar_y)
 
         loss = recon_loss + self.args.beta * kld + self.args.Lambda * relv
+        if (loss.isnan() == True):
+            print(1)
+        # print("loss: "+ str(loss))
 
         if self.args.vis_on and self.global_iter % self.args.gather_step == 0:
             self.gather.insert(iter=self.global_iter,
@@ -484,42 +547,78 @@ class SCAN(Solver):
         return loss
 
     def testing_process(self, data,show_plot):
-        [x, y, keys] = data
+        [x, y, keys,component] = data
+        compoenent_ID= (component == 1).nonzero(as_tuple=True)[1].tolist()
+        if((torch.sum(y,1)>3).nonzero(as_tuple=True)[0].numel()>0):
+            print(1)
         x = self.tensor(x)
         y = self.tensor(y)
         if self.keys is None:
             self.keys = np.asarray(keys)[:, 0].tolist()
             self.n_key = len(self.keys)
-        y_recon, mu_y, logvar_y = self.net(y)
-        z_x = self.beta_VAE_net._encode(x)
-        mu_x = z_x[:, :self.args.beta_VAE_z_dim]
-        logvar_x = z_x[:, self.args.beta_VAE_z_dim:]
+        y_x = self.net._decode(self.beta_VAE_net._encode(self.tensor(x))).cpu()
 
-        recon_loss = reconstruction_loss(y, y_recon, 'bernoulli')
-        kld = kl_divergence(mu_y, logvar_y)
-        relv = dual_kl_divergence(mu_x, logvar_x, mu_y, logvar_y)
 
-        loss = recon_loss + self.args.beta * kld + self.args.Lambda * relv
+        # if(show_plot):
+        all_attribute=""
+        for attr_ind in range(self.n_key):
+            if(y_x[0][attr_ind]>=0.3):
+                y_x[0][attr_ind]=1
+                all_attribute+=self.keys[attr_ind]+";"
+            else:
+                y_x[0][attr_ind] = 0
 
-        if self.args.vis_on and self.global_iter % self.args.gather_step == 0:
-            self.gather.insert(iter=self.global_iter,
-                               mu=mu_y.mean(0).data, var=logvar_y.exp().mean(0).data,
-                               recon_loss=recon_loss.data, kld=kld.data, relv=relv.data)
+        attr_text = ""
+        for i_key in range(self.n_key):
+            if y[0][i_key] >= 1.:
+                attr_text += self.keys[i_key]+";"
 
-        if self.global_iter % self.args.display_save_step == 0:
-            self.vis_display([x, self.visual(y)])
-        if(show_plot):
-            all_attribute=""
-            for attr_ind in range(self.n_key):
-                if(z_x[attr_ind]>0.3):
-                    all_attribute+=self.keys[attr_ind]
-            plt.imshow(x)
-            plt.title(all_attribute)
-            plt.show
-        return z_x,y
+        plt.imshow(np.einsum('zxy->xyz',x[0].cpu().detach().numpy()))
+        plt.title("real attributes:"+attr_text+" predicted attributes:"+all_attribute)
+        plt.show()
+
+        return y_x,y,compoenent_ID
+
+    def sym2img(self,symbol):
+
+        output_dir = os.path.join(self.output_dir, str(self.global_iter))
+        os.makedirs(output_dir, exist_ok=True)
+
+        def save_display(images, name, nrow):
+            images = torch.stack(images, dim=0)
+            self.vis.images(images, env=self.env_name+'_'+name,
+                            opts=dict(title='iter:{}'.format(self.global_iter)), nrow=nrow)
+            save_image(images, os.path.join(output_dir, '{}.jpeg'.format(name)), nrow)
+
+        #sym2img
+        images = []
+        num_sym2img=1
+        toimage = transforms.ToPILImage('RGB')
+        # for i in range(self.n_key):
+        i=4
+        random_ys = np.zeros((num_sym2img, self.nc))
+        random_ys[:, i] = 100
+        random_ys = self.tensor(random_ys)
+        image_subset = self.DAE_net(self.beta_VAE_net._decode(self.net._encode(random_ys))).cpu().data
+        nrow = int(math.sqrt(num_sym2img))
+        image_subset = toimage(make_grid(image_subset, nrow=int(math.sqrt(num_sym2img))))
+        plt.imshow(image_subset)
+        plt.title("leg")
+        plt.show()
+        # image_subset.resize((nrow * self.args.image_size, nrow * self.args.image_size))
+        #
+        # board = Image.new('RGB', (nrow * self.args.image_size, nrow * self.args.image_size + 15), 'white')
+        # board.paste(image_subset, (0, 15))
+        # drawer = ImageDraw.Draw(board)
+        # drawer.text((0, 0), self.keys[i], fill='black')
+
+        # images.append(transforms.ToTensor()(board))
+
+        # save_display(images, 'sym2img', 5)
 
     def visual(self, y):
         return self.DAE_net(self.beta_VAE_net._decode(self.net._encode(y)))
+        # return self.beta_VAE_net._decode(self.net._encode(y))
     def get_win_states(self):
         return {'recon': self.win_recon,
                 'kld': self.win_kld,
@@ -593,7 +692,7 @@ class SCAN(Solver):
             sorted_y = y_x.copy()
             sorted_y.sort(reverse=True)
             sym_text = ''
-            for i_key in range(10):
+            for i_key in range(min(10,n_key)):
                 if sorted_y[i_key] > 0.4:
                     index = y_x.index(sorted_y[i_key])
                     sym_text = sym_text + '[{0}: {1:.3f}]\n'.format(self.keys[index], y_x[index])
@@ -609,6 +708,7 @@ class SCAN(Solver):
             random_ys[:, i] = 3
             random_ys = self.tensor(random_ys)
             image_subset = self.DAE_net(self.beta_VAE_net._decode(self.net._encode(random_ys))).cpu().data
+            # image_subset = self.beta_VAE_net._decode(self.net._encode(random_ys)).cpu().data
             nrow = int(math.sqrt(num_sym2img))
             image_subset = toimage(make_grid(image_subset, nrow=int(math.sqrt(num_sym2img))))
             image_subset.resize((nrow * self.args.image_size, nrow * self.args.image_size))
@@ -634,6 +734,7 @@ class SCAN(Solver):
                 return vector
             random_ys = self.tensor(np.concatenate([set_value(j) for j in interpolation], axis=0))
             image_subset = self.DAE_net(self.beta_VAE_net._decode(self.net._encode(random_ys))).cpu().data
+            # image_subset = self.beta_VAE_net._decode(self.net._encode(random_ys)).cpu().data
             collection.append(image_subset)
             image_row = toimage(make_grid(image_subset, nrow=n_traverse))
             image_row.resize((n_traverse * self.args.image_size, self.args.image_size))
@@ -655,7 +756,9 @@ class SCAN(Solver):
 def reconstruction_loss(X, Y, distribution):
     batch_size = X.size(0)
     assert batch_size != 0
-
+    # pos_weight = torch.ones([n_key])
+    # criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # recon_loss=criterion(X.cpu(), Y.cpu())
     if distribution == 'bernoulli':
         recon_loss = -(X * torch.log(Y) + (1 - X) * torch.log(1 - Y)).sum() / batch_size
     elif distribution == 'gaussian':
@@ -664,7 +767,8 @@ def reconstruction_loss(X, Y, distribution):
         recon_loss = None
     return recon_loss
 
-def kl_divergence(mu, logvar):
+def kl_divergence(mu, logvar):#forward
+# def kl_divergence( logvar, mu):
     batch_size = mu.size(0)
     assert batch_size != 0
     if mu.data.ndimension() == 4:
@@ -677,6 +781,8 @@ def kl_divergence(mu, logvar):
     return klds.mean(0).sum()
 
 def dual_kl_divergence(mu_x, logvar_x, mu_y, logvar_y):
+# def dual_kl_divergence(mu_y, logvar_y, mu_x, logvar_x):
+
     batch_size = mu_x.size(0)
     assert batch_size != 0
 
