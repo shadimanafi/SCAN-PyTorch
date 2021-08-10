@@ -11,8 +11,21 @@ from tqdm import tqdm
 test_percent=0.2
 shuffle_dataset=True
 from torch.utils.data.sampler import SubsetRandomSampler
-datasetType=1
-# datasetType=3
+from solver import sub_components_number,main_components_number,sub_components,main_components
+# datasetType=1
+datasetType=3
+if(datasetType==0):
+  n_key=51
+#Celebrity photos
+elif(datasetType==1):
+  n_key=40
+#Pascalimage
+elif(datasetType==2):
+  n_key=64
+#our dataset:furnichure dataset
+elif(datasetType==3):
+  n_key=sub_components_number
+
 
 def is_power_of_2(num):
     return ((num & (num - 1)) == 0) and num != 0
@@ -33,10 +46,10 @@ class CustomImageFolder(ImageFolder):
 class CustomMixDataset(Dataset):
     def __init__(self, root, transform=None):
         self.image_folder = CustomImageFolder(root, transform)
-        self.attr_tensor = self.get_tensor(root)
+        self.comp_tensor,self.attr_tensor = self.get_tensor(root)
 
     def __getitem__(self, index):
-        return [self.image_folder.__getitem__(index), self.attr_tensor[index], self.keys]
+        return [self.image_folder.__getitem__(index), self.attr_tensor[index], self.keys,self.comp_tensor[index]]
 
     def __len__(self):
         return self.len
@@ -70,28 +83,34 @@ class CustomMixDataset(Dataset):
             attr_file = open(os.path.join(root, 'Anno/componentsLabels.txt'), 'r')
             lines = attr_file.readlines()
             self.len = len(lines)-1
-
             def isnt_punct(w):
                 return not w in ['', ' ', ',', '\n']
 
-            self.keys = list(map(lambda x: x.lstrip(';'), list(filter(isnt_punct, lines.pop(0).split(';')))))
-            self.n_key = len(self.keys)
+            # list(map(lambda x: x.lstrip(';'), list(filter(isnt_punct, lines.pop(0).split(';')))))
+            self.keys = list(map(lambda x: x.lstrip(';'), list(filter(isnt_punct, lines.pop(0).split(';')))))[main_components_number:]
+            self.n_key = sub_components_number
             attr_tensor = []
+            comp_tensor=[]
             pbar = tqdm(total=self.len)
             pbar.set_description('[Loading Dataset]')
             for line in lines:
                 pbar.update(1)
-                words = [word for word in line.split(';')[0:] if word != '' and word != '\n']
+                words = [word for word in line.split(';')[:] if word != '' and word != '\n']
                 # vector = list(map(lambda x: (1 + float(x)) / 2, words))
-                vector=words
-                vector = np.array(vector)
-                vector.resize([1, self.n_key])
-                attr_tensor.append(vector)
+                comp_vector = list(map(lambda x: (float(x)), words))[0:main_components_number]
+                comp_vector = np.array(comp_vector)
+                comp_vector.resize([1, main_components_number])
+                comp_tensor.append(comp_vector)
+                sub_vector = list(map(lambda x: (float(x)), words))[main_components_number:]
+                sub_vector = np.array(sub_vector)
+                sub_vector.resize([1, sub_components_number])
+                attr_tensor.append(sub_vector)
+            comp_tensor = np.concatenate(comp_tensor)
             attr_tensor = np.concatenate(attr_tensor)
             pbar.write('[Dataset Loading Finished]')
             pbar.close()
 
-            return attr_tensor
+            return comp_tensor, attr_tensor
 
 
 class CustomTensorDataset(Dataset):
@@ -156,7 +175,6 @@ def return_data(args, require_attr=False):
     train_data = dset(**train_kwargs)
     train_loader = DataLoader(train_data,
                               batch_size=batch_size,
-                              shuffle=True,
                               num_workers=num_workers,
                               pin_memory=True,
                               drop_last=True)
@@ -240,8 +258,7 @@ def return_data_test(args, require_attr=False):
                               sampler=test_sampler)
 
     data_loader = train_loader
-
-    return train_loader,data_loader
+    return train_loader,test_loader
 
 if __name__ == '__main__':
     transform = transforms.Compose([
